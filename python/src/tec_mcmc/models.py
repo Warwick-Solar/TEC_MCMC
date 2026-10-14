@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+import numpy as np
+
+N_HARMONICS = 4
+N_BACKGROUND_PARAMS = 13
+N_FLARE_PARAMS = 4
+
+
+def harmonic_background(t: np.ndarray, params: np.ndarray) -> np.ndarray:
+    """Four-sinusoid background used by the IDL routine.
+
+    Parameter layout:
+        [c0,
+         A1, P1, phi1,
+         A2, P2, phi2,
+         A3, P3, phi3,
+         A4, P4, phi4]
+    """
+    t = np.asarray(t, dtype=float)
+    p = np.asarray(params, dtype=float)
+    if p.shape[-1] < N_BACKGROUND_PARAMS:
+        raise ValueError("Need at least 13 background parameters.")
+
+    out = np.full_like(t, p[0], dtype=float)
+    for j in range(N_HARMONICS):
+        i = 1 + 3 * j
+        amplitude, period, phase = p[i : i + 3]
+        if period <= 0:
+            raise ValueError("Harmonic periods must be positive.")
+        out += amplitude * np.sin(2.0 * np.pi * t / period + phase)
+    return out
+
+
+def flare_profile(
+    t: np.ndarray,
+    amplitude: float,
+    peak_time: float,
+    rise_time: float,
+    decay_time: float,
+) -> np.ndarray:
+    """Asymmetric exponential flare profile from the IDL routine."""
+    t = np.asarray(t, dtype=float)
+    if rise_time <= 0 or decay_time <= 0:
+        raise ValueError("Flare rise and decay times must be positive.")
+
+    dt = t - peak_time
+    out = np.empty_like(t, dtype=float)
+    left = dt < 0
+    out[left] = amplitude * np.exp(dt[left] / rise_time)
+    out[~left] = amplitude * np.exp(-dt[~left] / decay_time)
+    return out
+
+
+def full_model(t: np.ndarray, params: np.ndarray, n_flares: int) -> np.ndarray:
+    """Background plus `n_flares` asymmetric exponential components.
+
+    `params` excludes the observational-noise sigma. If a vector including
+    sigma is passed, slice it first with `params[:-1]`.
+    """
+    p = np.asarray(params, dtype=float)
+    expected = N_BACKGROUND_PARAMS + N_FLARE_PARAMS * n_flares
+    if p.size != expected:
+        raise ValueError(f"Expected {expected} model parameters, got {p.size}.")
+
+    model = harmonic_background(t, p[:N_BACKGROUND_PARAMS])
+    for k in range(n_flares):
+        i = N_BACKGROUND_PARAMS + N_FLARE_PARAMS * k
+        model += flare_profile(t, *p[i : i + N_FLARE_PARAMS])
+    return model
+
+
+def split_model_components(
+    t: np.ndarray, params: np.ndarray, n_flares: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return `(background, summed_flares)` for a model parameter vector."""
+    p = np.asarray(params, dtype=float)
+    background = harmonic_background(t, p[:N_BACKGROUND_PARAMS])
+    flares = np.zeros_like(np.asarray(t, dtype=float))
+    for k in range(n_flares):
+        i = N_BACKGROUND_PARAMS + N_FLARE_PARAMS * k
+        flares += flare_profile(t, *p[i : i + N_FLARE_PARAMS])
+    return background, flares
+
+
+def unpack_parameter_matrix(
+    matrix: np.ndarray, n_flares: int
+) -> dict[str, np.ndarray]:
+    """Unpack rows in the SoBAT-compatible parameter order.
+
+    The final column is observational-noise sigma.
+    """
+    m = np.asarray(matrix, dtype=float)
+    expected = N_BACKGROUND_PARAMS + N_FLARE_PARAMS * n_flares + 1
+    if m.ndim != 2 or m.shape[1] != expected:
+        raise ValueError(f"Expected shape (n_samples, {expected}).")
+
+    out: dict[str, np.ndarray] = {
+        "offset": m[:, 0],
+        "harmonic_amplitude": np.column_stack(
+            [m[:, 1], m[:, 4], m[:, 7], m[:, 10]]
+        ),
+        "harmonic_period": np.column_stack(
+            [m[:, 2], m[:, 5], m[:, 8], m[:, 11]]
+        ),
+        "harmonic_phase": np.column_stack(
+            [m[:, 3], m[:, 6], m[:, 9], m[:, 12]]
+        ),
+        "sigma": m[:, -1],
+    }
+    if n_flares:
+        flare = m[:, N_BACKGROUND_PARAMS:-1].reshape(m.shape[0], n_flares, 4)
+        out["flare_amplitude"] = flare[:, :, 0]
+        out["flare_peak_time"] = flare[:, :, 1]
+        out["flare_rise_time"] = flare[:, :, 2]
+        out["flare_decay_time"] = flare[:, :, 3]
+    return out
