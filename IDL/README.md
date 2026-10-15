@@ -30,13 +30,13 @@ Add both libraries and this repository to the IDL path, e.g. in your IDL startup
 ```idl
 !PATH = EXPAND_PATH('+/path/to/SoBAT/idl') + PATH_SEP(/SEARCH_PATH) + $
         EXPAND_PATH('+/path/to/coyote')    + PATH_SEP(/SEARCH_PATH) + $
-        EXPAND_PATH('+/path/to/this/repo') + PATH_SEP(/SEARCH_PATH) + !PATH
+        EXPAND_PATH('+/path/to/TEC_MCMC/IDL') + PATH_SEP(/SEARCH_PATH) + !PATH
 ```
 
 or via *IDL Workbench → Preferences → IDL → Paths*. Check:
 
 ```idl
-IDL> print, file_which('mcmc_fit.pro'), file_which('cgpercentiles.pro')
+IDL> print, file_which('mcmc_fit.pro'), file_which('cgpercentiles.pro'), file_which('tec_bayes_decomp.pro')
 ```
 
 ## Input data
