@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tec-mcmc"
-version = "0.1.0"
+version = "0.1.3"
 description = "Python/PyMC implementation of the MCMC TEC detrending workflow previously run through SoBAT/IDL."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
@@ -24,7 +24,7 @@ test = ["pytest>=8.0"]
 where = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q -m \"not mcmc\""
 testpaths = ["tests"]
 markers = [
   "mcmc: slow test requiring PyMC sampling",
