@@ -1,2 +1,2 @@
 # TEC_MCMC
-MCMC approach of detrending TEC time series
+Bayesian MCMC approach of detrending TEC time series
