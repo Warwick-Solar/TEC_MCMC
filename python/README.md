@@ -1,6 +1,6 @@
 # TEC MCMC detrending — Python prototype
 
-This package reproduces the **scientific model and outputs used by `TEC_all-day_noise.pro`** without requiring IDL, GDL, or SoBAT.
+This package reproduces the **scientific model and outputs used by `tec_bayes_decomp.pro`** without requiring IDL, GDL, or SoBAT.
 
 It is deliberately **not a line-by-line port of SoBAT**. PyMC supplies the MCMC machinery. The code preserves the parts of the SoBAT workflow that matter for the colleague's script:
 
