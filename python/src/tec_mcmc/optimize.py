@@ -16,7 +16,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from .config import PriorConfig
-from .models import N_BACKGROUND_PARAMS, N_FLARE_PARAMS, full_model
+from .models import N_BACKGROUND_PARAMS, N_FLARE_PARAMS, N_HARMONICS, full_model
 
 
 @dataclass
@@ -41,7 +41,7 @@ def parameter_bounds(
     )
     lo = [priors.offset_low]
     hi = [priors.offset_high]
-    for _ in range(4):
+    for _ in range(N_HARMONICS):
         lo += [priors.harmonic_amplitude_low, period_low, priors.phase_low]
         hi += [priors.harmonic_amplitude_high, priors.harmonic_period_high, priors.phase_high]
     for i in np.asarray(flare_indices, dtype=int):
@@ -71,7 +71,7 @@ def _random_start(
     x = np.empty_like(lo)
     x[0] = np.mean(y)
     half_range = max(0.5 * float(np.ptp(y)), 1e-6)
-    for j in range(4):
+    for j in range(N_HARMONICS):
         i = 1 + 3 * j
         x[i] = rng.uniform(0.0, half_range)
         x[i + 1] = np.exp(rng.uniform(np.log(lo[i + 1]), np.log(hi[i + 1])))
