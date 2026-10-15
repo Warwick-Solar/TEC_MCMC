@@ -1,145 +1,171 @@
-# TEC MCMC detrending — Python prototype
+# TEC Bayesian background–flare decomposition (Python)
 
-This package reproduces the **scientific model and outputs used by `tec_bayes_decomp.pro`** without requiring IDL, GDL, or SoBAT.
+Python version of the IDL routine `tec_bayes_decomp.pro` (see `../IDL`). It detrends GNSS total electron content (TEC) curves and extracts the ionospheric response to solar flares (ΔTEC). Each TEC curve (one satellite pass) is fitted over its whole duration as a smooth background plus a set of flare-induced peaks:
 
-It is deliberately **not a line-by-line port of SoBAT**. PyMC supplies the MCMC machinery. The code preserves the parts of the SoBAT workflow that matter for the colleague's script:
+```
+y(t)   = B(t) + Σ_k F_k(t)
+B(t)   = c0 + Σ_{j=1..4} A_j sin(2π t / P_j + φ_j)
+F_k(t) = I_k exp[ (t − t_k)/τ_r,k]   for t <  t_k
+         I_k exp[−(t − t_k)/τ_d,k]   for t ≥ t_k
+```
 
-- four-sinusoid background model;
-- optional asymmetric exponential flare components;
-- the same bounded uniform priors used in the IDL script;
-- unknown Gaussian observational noise `sigma`, with the SoBAT default prior `Uniform(0, max(y)-min(y))`;
-- a returned fit defined by the **highest-posterior sampled state** (for these uniform priors this is the highest-likelihood sampled state), matching `mcmc_fit`'s practical behaviour;
-- posterior-predictive draws including observational noise;
-- pointwise 95% posterior-predictive intervals;
-- batch-level multiprocessing across independent light curves.
+The model, priors, preprocessing and dummy-peak logic follow the IDL routine; the posterior is sampled with [PyMC](https://www.pymc.io) instead of SoBAT, so no IDL licence is needed. The number of peaks and their initial times come from user-supplied reference times (e.g. solar EUV peaks). Curves with fewer than 3 reference peaks get one extra "dummy" peak at a random time, which is used to estimate the level of spurious amplitudes. The method is described in Bekker, Kolotkov & Belov (submitted to GRL).
 
-The MCMC kernel is intentionally *not* identical to SoBAT. The default is PyMC's `DEMetropolisZ`, which is a gradient-free adaptive Metropolis-family sampler. `NUTS` is also available. This should be validated against representative SoBAT fits before publication.
+## Requirements
 
-## Safe installation on a Mac
+- Python 3.12 or 3.13.
+- NumPy, SciPy, pandas, Matplotlib, **PyMC 6** and ArviZ 1 (versions in `pyproject.toml`).
 
-The supplied Conda environment is isolated from your existing Python/MPI/PETSc setup:
+With Conda (an isolated environment, recommended):
 
 ```bash
-cd tec_mcmc_python
+cd TEC_MCMC/python
 conda env create -f environment.yml
 conda activate tec-mcmc
 ```
 
-Alternatively, in an already isolated Python 3.12 environment:
+or with pip, in an existing Python 3.12 environment:
 
 ```bash
+cd TEC_MCMC/python
 python -m pip install -e '.[test]'
 ```
 
-## Run deterministic tests
+Check:
 
 ```bash
-pytest
+python -c "import tec_mcmc, pymc; print(tec_mcmc.__file__, pymc.__version__)"
+pytest            # fast deterministic tests
+pytest -m mcmc    # short end-to-end MCMC run on a synthetic curve (~1 min)
 ```
 
-These tests do not need to run a long MCMC chain.
+No C compiler is needed: set `pytensor.config.cxx = ""` (or `PYTENSOR_FLAGS="cxx="`) as in the example notebook.
 
-## Run the synthetic end-to-end smoke test
+## Input data
 
-```bash
-python examples/synthetic_smoke_test.py
-```
+The same CSV as for the IDL version, without a header:
 
-The smoke test intentionally uses a small number of draws so it finishes quickly. It is a functionality test, not a convergence-quality run.
+| column | content |
+|---|---|
+| 1 | time, UT seconds of day |
+| 2 … N+1 | TEC [TECU] for N satellite passes; `NaN` where a pass has no data |
 
-## Minimal use
+`load_tec_csv` converts time to **minutes**. `../IDL/example/` contains a short file in this format (176 passes, 07:00–09:00 UT on 8 March 2011); the notebook uses the full-day file for 7 September 2017 in `../Data/`.
+
+Reference peak times are given separately, in **UT minutes of day**.
+
+## Usage
+
+`notebooks/Example.ipynb` is the worked example: it fits one curve (plots, diagnostics, chain agreement, posterior summary) and then fits many curves in parallel.
+
+### One curve
 
 ```python
-from tec_mcmc import SamplerConfig, fit_curve
+import numpy as np
+from tec_mcmc import SamplerConfig, fit_curve, load_tec_csv, prepare_curve
 
-result = fit_curve(
-    t,
-    y,
-    flare_indices=[120],
-    config=SamplerConfig(
-        draws=4000,
-        tune=4000,
-        chains=4,
-        cores=1,                 # safe inside outer batch workers
-        sampler="demetropolisz",
-        random_seed=42,
-    ),
-)
+t_peaks = np.array([544., 549., 555., 561., 578.])        # UT minutes
+curves = load_tec_csv("tec_20170906.csv")                 # list of (t [min], TEC) per pass
 
-trend = result.map_trend
-flares = result.map_flares
-lower = result.ppd_lower
-upper = result.ppd_upper
+i = 0                                                     # 0-based curve index, as CURVES in IDL
+t_abs, y_raw = curves[i]
+t, y, flare_idx, true_idx, t0 = prepare_curve(t_abs, y_raw, t_peaks,
+                                              rng=np.random.default_rng(i))
+
+result = fit_curve(t, y, flare_idx, config=SamplerConfig(draws=20_000, tune=20_000))
+dtec = y - result.map_trend                               # ΔTEC
 ```
 
-## Parallel batch fitting
+`prepare_curve` performs all steps of the IDL loop before `mcmc_fit`: plateau collapse and interpolation, time shift to 0, matching of the reference times to samples, and the dummy peak.
 
-Parallelise **curves**, not iterations of a single Markov chain:
+### All curves
 
 ```python
-from tec_mcmc.batch import fit_many_curves
+from tec_mcmc import fit_tec_csv
 
-results = fit_many_curves(curves, max_workers=8, config=config)
+if __name__ == "__main__":
+    fit_tec_csv("tec_20170906.csv", "results/map_params.json", t_peaks,
+                config=SamplerConfig(progressbar=False), curves=None, max_workers=8)
 ```
 
-Each entry in `curves` is `(t, y, flare_indices)`.
+Curves are fitted in parallel worker processes, one PyMC core each. The JSON file is rewritten every `save_every` curves and curves already in it are skipped, so an interrupted run resumes when called again. Set `PYTENSOR_FLAGS` and `OMP/MKL/OPENBLAS_NUM_THREADS=1` before the call (see the notebook). On macOS, call it from a notebook or under `if __name__ == "__main__":`.
 
-## Important methodological note
+### Settings
 
-The four harmonic components have exchangeable/overlapping priors in the original script. Their labels can therefore switch. The *sum* of the four harmonics (the detrending curve) can still be well determined, while individual harmonic periods may not be uniquely labelled. This prototype preserves that behaviour for compatibility. If individual harmonic parameters are to be interpreted scientifically, impose an ordering or non-overlapping period ranges in a later model revision.
+`SamplerConfig` (see `config.py` for all fields):
+
+| field | default | meaning |
+|---|---|---|
+| `draws`, `tune` | 20 000, 20 000 | posterior samples and tuning steps per chain |
+| `chains`, `cores` | 4, 1 | number of chains; cores per curve (keep 1 with `fit_tec_csv`) |
+| `sampler` | `"demetropolisz"` | PyMC step method (`"nuts"` also available) |
+| `confidence_level` | 0.95 | credible level |
+| `ppd_draws` | 5000 | posterior-predictive draws for the credible band |
+| `n_starts` | 30 | multi-start least-squares runs that seed the chains (0 = IDL initial guess) |
+| `random_seed` | 42 | sampler seed |
+
+`fit_tec_csv` keywords: `curves` (`None` = all, `n` = first n, or a list of 0-based indices), `max_workers`, `save_every` (10). The dummy-peak position is seeded with the curve index.
+
+Prior ranges are in `PriorConfig` and match the IDL script.
+
+MCMC dominates the run time. For a quick test, use a few curves and short chains, e.g. `curves=[0, 1]`, `draws=tune=5_000`. For production, use 50 000–100 000 draws (a few minutes per curve).
+
+## Output
+
+`fit_curve` returns a `FitResult`:
+
+- `t`, `y`: time [min, from the first point] and preprocessed TEC
+- `map_model`, `map_trend`, `map_flares`: best-fit model, background B(t), sum of peaks Σ F_k(t). ΔTEC = `y − map_trend`
+- `ppd_lower`, `ppd_upper`: credible band of the posterior predictive distribution
+- `map_params`, `sigma_map`, `map_log_likelihood`: best-fit parameters, noise level and log-likelihood
+- `posterior_samples`: all samples (rows chain by chain, same column layout as `map_params`)
+- `flare_indices`, `n_flares`: indices of the initial peak times and number of peaks
+- `diagnostics`: R-hat, ESS and chain agreement (see below); `map_source`: `"mcmc"` or `"optimizer"`
+
+`fit_tec_csv` writes one JSON file with an entry `"flare_<i>"` per curve: `t_0` (start time, UT min), `t`, `y_raw`, `flare_indices`, `true_indices`, `has_dummy` and `map_params`.
+
+Parameter layout: `[c0, (A_j, P_j, φ_j)×4, (I_k, t_k, τ_r,k, τ_d,k)×K, σ_noise]`. Peak times `t_k` are counted from the first point of the curve, so UT minute = `t_k + t_0`. Harmonics are sorted by period, shortest first. If a dummy peak was added (fewer than 3 reference peaks), it is the last peak block; otherwise there is no dummy block. `unpack_parameter_matrix` splits samples into named arrays.
+
+No figures are written; the notebook shows how to plot the fit, ΔTEC and the chains.
+
+## Differences from the IDL version
+
+- **Sampler.** PyMC's `DEMetropolisZ` (gradient-free, adaptive) instead of SoBAT. Chains start from the best solutions of a multi-start least-squares search, and the best fit is the highest-likelihood state among all samples and that solution.
+- **Parametrisation.** Harmonics are sampled as `b_sin`, `b_cos` with ordered periods. The prior is unchanged (uniform in amplitude and phase) and so are the fitted curves; this only removes label switching and the phase wrap.
+- **Output.** `FitResult` / JSON instead of the `.sav` file; no NaN dummy block for curves with ≥ 3 reference peaks.
+- **Preprocessing details.** Beyond the first/last plateau the edge value is held constant (IDL `INTERPOL` extrapolates linearly); the last plateau is closed; double precision throughout.
+
+
+## Notes on convergence
+
+Over a ~2-hour window many sets of four sinusoids give the same smooth trend, and two nearby-period sinusoids with large opposite amplitudes can cancel. Single background parameters are therefore not identifiable and their R-hat stays above 1; this is a property of the model and its wide priors, not of the sampler. The quantities that matter are checked instead:
+
+- `rhat_curves_max`, `ess_curves_min`: R-hat and ESS of the trend, the summed peaks, the full model and σ. `converged` is `True` when R-hat < 1.05 and ESS > 100.
+- `*_chain_spread_over_sigma`: largest difference between the chains' mean curves, in units of σ. If the trend and flare spreads exceed the model spread, the background/flare split is uncertain.
+
+The best-fit trend and peaks are reliable. When chains settle in different modes, the credible band mixes them and should be read as indicative.
 
 ## Files
 
-- `src/tec_mcmc/models.py` — NumPy model functions and parameter-vector layout.
-- `src/tec_mcmc/preprocess.py` — plateau handling, noise estimate, and flare-candidate helpers.
-- `src/tec_mcmc/inference.py` — PyMC model, sampling, MAP-sample extraction, PPD intervals.
-- `src/tec_mcmc/batch.py` — process-level parallel fitting across curves.
-- `src/tec_mcmc/io.py` — save/load compact fit results.
-- `tests/test_core.py` — deterministic unit tests.
-- `examples/synthetic_smoke_test.py` — small end-to-end MCMC test.
-- `examples/run_tec_csv_template.py` — template for adapting the colleague's CSV workflow.
+| file | content |
+|---|---|
+| `src/tec_mcmc/config.py` | `SamplerConfig` (sampling) and `PriorConfig` (prior ranges) |
+| `src/tec_mcmc/models.py` | model functions and parameter layout |
+| `src/tec_mcmc/preprocess.py` | plateau handling, noise estimate, reference-peak matching, dummy peak |
+| `src/tec_mcmc/tec.py` | `load_tec_csv`, `prepare_curve` |
+| `src/tec_mcmc/optimize.py` | multi-start least-squares search that seeds the chains |
+| `src/tec_mcmc/inference.py` | PyMC model, sampling, best fit, credible band, diagnostics |
+| `src/tec_mcmc/batch.py` | `fit_tec_csv`: parallel, resumable fitting of a whole CSV |
+| `tests/` | unit tests and an end-to-end MCMC test (`pytest -m mcmc`) |
+| `notebooks/Example.ipynb` | worked example |
 
+## Citation
 
-## Review notes / changes (v0.1.1)
+If you use this code, please cite:
 
-**Bug fixes**
+- Bekker, S. Z., Kolotkov, D. Y., & Belov, S. A., *A Bayesian approach to GNSS TEC detrending during solar flares: substructure and relaxation of the ionospheric response*, Geophys. Res. Lett. (submitted).
+- Abril-Pla, O., et al. (2023), *PyMC: a modern, and comprehensive probabilistic programming framework in Python*, PeerJ Comput. Sci., 9, e1516, [doi:10.7717/peerj-cs.1516](https://doi.org/10.7717/peerj-cs.1516).
 
-- `load_tec_csv` used `header="infer"`, but the TEC CSV files have no header, so the first time sample was silently dropped from every curve. It now defaults to `header=None` (as IDL `READ_CSV` behaves).
-- The example notebook skipped the IDL preprocessing (plateau collapse + interpolation, time shift to 0). Use `tec.prepare_curve(...)`, which performs every pre-`mcmc_fit` step of the IDL loop (including the dummy-flare logic).
-- `estimate_noise_savgol` now follows IDL exactly: window rule `n/5` (2 if `< degree`), `EDGE_TRUNCATE` boundary (`mode="nearest"`) and sample standard deviation (ddof=1).
-- `fit_many_curves` no longer loses a whole batch when one curve fails (`on_error="return"`).
+## Author
 
-**Sampling quality**
-
-The posterior of four free-period sinusoids plus flares is strongly multimodal. Started from the generic IDL guess, `DEMetropolisZ` stayed far from the best mode (e.g. curve 0: sigma 0.15 vs 0.08 attainable, R-hat 2-4). The fit now:
-
-1. runs a multi-start bounded least-squares search (`optimize.py`, `SamplerConfig.n_starts`);
-2. starts each chain from one of the best optima (pushed inside the prior bounds, jittered);
-3. returns the highest-likelihood state among all MCMC samples *and* the best optimiser solution (`FitResult.map_source` says which);
-4. reports `FitResult.diagnostics` (`rhat_max`, `ess_bulk_min`, `converged`).
-
-Caveat: chains still typically settle in different modes (R-hat >> 1). The best-fit trend and flares are reliable; the pooled posterior-predictive band is a mixture over modes and should be read as indicative only. Default draws were raised to 20 000 + 20 000 (roughly the IDL 100 000 + 100 000 budget; DEMetropolisZ is cheap).
-
-**Other**
-
-- `_log_likelihoods` is vectorised (the per-row Python loop dominated run time for >1e5 samples).
-- New tests for the loader, the likelihood, the optimiser and the noise estimate.
-- `notebooks/fit_one_curve.ipynb` replaces the ad-hoc `src/tec_mcmc/Untitled.ipynb` workflow.
-
-**Known differences from the IDL routine** (deliberate): IDL's `INTERPOL` extrapolates linearly beyond the first/last plateau midpoint, whereas we hold the edge value constant; the final plateau is closed (the IDL `q EQ n` test is unreachable); IDL stores plateau arrays in single precision.
-
-
-## Convergence work (v0.1.2)
-
-Why R-hat stays high for single parameters: over a ~2-hour window many different sets of four sinusoids produce the same smooth trend, and two nearby-period sinusoids with large opposite amplitudes can cancel almost exactly. Single trend parameters are therefore not identifiable. That is a property of the model and its wide IDL priors (amplitude up to 500, period down to 50 min), not of the sampler; SoBAT faces the same posterior but only reports its MAP.
-
-Changes:
-
-- **Cartesian harmonics** (`b_sin`, `b_cos` instead of amplitude/phase). This removes the phase wrap at +-pi and the singularity at A = 0. With `PriorConfig.amplitude_prior="idl"` (the default), a `-log A` potential keeps the IDL prior (uniform in A and in phase) exactly.
-- **Ordered periods** remove the 24 label-switching copies of every mode. The fitted curves are unchanged; harmonic 1 is now the shortest period.
-- **Chain starts fixed.** v0.1.1 jittered starts by a fraction of the *prior range*, e.g. +-2.5 in amplitude for a 0.3 signal, so chains began outside the mode and wandered. Chains now start at the best optimum, or at any optimum within `mode_tolerance` log-likelihood units of it, jittered by the local Laplace standard deviation.
-- **Curve-level diagnostics.** These cover the trend, the summed flares, the full model and sigma: `rhat_curves_max`, `ess_curves_min`, and `*_chain_spread_over_sigma` (the largest gap between chain-mean curves divided by sigma). `converged` is judged on the curves. Parameter-level values are still reported.
-
-Tried and not adopted: NUTS and nutpie (slower, and worse on these ridges); SMC; tighter amplitude bounds (they made mixing worse, and they change the science). Analytic marginalisation of the linear parameters made the flare parameters mix better. It also showed that the posterior puts real mass on large cancelling sinusoid pairs, so the trend/flare split is inherently uncertain.
-
-Curve 789 (4 known flares, 4 x (100k + 100k) draws, ~3.5 min): full-model chains agree to 0.26 sigma, curve R-hat is 1.25 with ESS of about 550, and the trend/flare split differs by about 1.5 sigma between chains. With 20k draws, curve R-hat is about 1.9 and ESS about 55. For production, use 50k-100k draws.
+Sergey Belov, University of Warwick (sergey.belov@warwick.ac.uk)
