@@ -5,7 +5,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .preprocess import interpolate_collapsed_plateaus
+from .preprocess import (
+    add_dummy_flare_candidate,
+    find_peak_indices,
+    interpolate_collapsed_plateaus,
+)
 
 
 def load_tec_csv(
@@ -30,20 +34,6 @@ def load_tec_csv(
     return curves
 
 
-def preprocess_tec_curve(
-    t: np.ndarray, y: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """Plateau preprocessing plus time shift used before MCMC.
-
-    Returns `(t_relative, y_processed, absolute_start_time)`.
-    """
-    t = np.asarray(t, dtype=float)
-    y = np.asarray(y, dtype=float)
-    y2 = interpolate_collapsed_plateaus(t, y, fill_edges=True)
-    t0 = float(np.min(t))
-    return t - t0, y2, t0
-
-
 def prepare_curve(
     t_abs: np.ndarray,
     y_raw: np.ndarray,
@@ -51,20 +41,20 @@ def prepare_curve(
     *,
     rng: np.random.Generator,
 ):
-    """Preprocess a curve before MCMC fit.
+    """Every pre-``mcmc_fit`` step of the IDL loop for one curve.
 
-    Returns ``(t_rel, y, flare_indices, true_indices, t0)`` where
-    ``flare_indices`` already contains the dummy flare (if any, see
+    Collapses constant plateaus and interpolates back, shifts time to start
+    at 0, maps the known flare times to samples and adds the dummy flare (see
     `add_dummy_flare_candidate`).
-    """
-    from .preprocess import add_dummy_flare_candidate, find_peak_indices
 
-    t_rel, y, t0 = preprocess_tec_curve(t_abs, y_raw)
-    true_idx = find_peak_indices(np.asarray(t_abs, float), t_peaks_solar, tolerance=_half_dt(t_rel))
+    Returns ``(t_rel, y, flare_indices, true_indices, t0)``.
+    """
+    t_abs = np.asarray(t_abs, dtype=float)
+    y = interpolate_collapsed_plateaus(t_abs, np.asarray(y_raw, dtype=float), fill_edges=True)
+    t0 = float(np.min(t_abs))
+    t_rel = t_abs - t0
+    # IDL matches flare times within half of the *first* sampling step.
+    tolerance = 0.5 * float(t_rel[1] - t_rel[0]) if len(t_rel) > 1 else np.inf
+    true_idx = find_peak_indices(t_abs, t_peaks_solar, tolerance=tolerance)
     flare_idx, true_idx = add_dummy_flare_candidate(len(t_rel), true_idx, rng=rng)
     return t_rel, y, flare_idx, true_idx, t0
-
-
-def _half_dt(t: np.ndarray) -> float:
-    """Tolerance ``0.5 * (t[1] - t[0])`` (first sampling step)."""
-    return 0.5 * float(t[1] - t[0]) if len(t) > 1 else np.inf
