@@ -6,6 +6,11 @@ N_HARMONICS = 4
 N_BACKGROUND_PARAMS = 13
 N_FLARE_PARAMS = 4
 
+# Column indices of the harmonic parameters in the flat parameter vector.
+AMP_IDX = 1 + 3 * np.arange(N_HARMONICS)
+PERIOD_IDX = AMP_IDX + 1
+PHASE_IDX = AMP_IDX + 2
+
 
 def harmonic_background(t: np.ndarray, params: np.ndarray) -> np.ndarray:
     """Four-sinusoid background used by the IDL routine.
@@ -52,6 +57,14 @@ def flare_profile(
     return out
 
 
+def _add_flares(out: np.ndarray, t: np.ndarray, p: np.ndarray, n_flares: int) -> np.ndarray:
+    """Add the `n_flares` flare profiles in `p` to `out` in place (fixed order)."""
+    for k in range(n_flares):
+        i = N_BACKGROUND_PARAMS + N_FLARE_PARAMS * k
+        out += flare_profile(t, *p[i : i + N_FLARE_PARAMS])
+    return out
+
+
 def full_model(t: np.ndarray, params: np.ndarray, n_flares: int) -> np.ndarray:
     """Background plus `n_flares` asymmetric exponential components.
 
@@ -63,11 +76,7 @@ def full_model(t: np.ndarray, params: np.ndarray, n_flares: int) -> np.ndarray:
     if p.size != expected:
         raise ValueError(f"Expected {expected} model parameters, got {p.size}.")
 
-    model = harmonic_background(t, p[:N_BACKGROUND_PARAMS])
-    for k in range(n_flares):
-        i = N_BACKGROUND_PARAMS + N_FLARE_PARAMS * k
-        model += flare_profile(t, *p[i : i + N_FLARE_PARAMS])
-    return model
+    return _add_flares(harmonic_background(t, p[:N_BACKGROUND_PARAMS]), t, p, n_flares)
 
 
 def split_model_components(
@@ -76,10 +85,7 @@ def split_model_components(
     """Return `(background, summed_flares)` for a model parameter vector."""
     p = np.asarray(params, dtype=float)
     background = harmonic_background(t, p[:N_BACKGROUND_PARAMS])
-    flares = np.zeros_like(np.asarray(t, dtype=float))
-    for k in range(n_flares):
-        i = N_BACKGROUND_PARAMS + N_FLARE_PARAMS * k
-        flares += flare_profile(t, *p[i : i + N_FLARE_PARAMS])
+    flares = _add_flares(np.zeros_like(np.asarray(t, dtype=float)), t, p, n_flares)
     return background, flares
 
 
@@ -97,19 +103,13 @@ def unpack_parameter_matrix(
 
     out: dict[str, np.ndarray] = {
         "offset": m[:, 0],
-        "harmonic_amplitude": np.column_stack(
-            [m[:, 1], m[:, 4], m[:, 7], m[:, 10]]
-        ),
-        "harmonic_period": np.column_stack(
-            [m[:, 2], m[:, 5], m[:, 8], m[:, 11]]
-        ),
-        "harmonic_phase": np.column_stack(
-            [m[:, 3], m[:, 6], m[:, 9], m[:, 12]]
-        ),
+        "harmonic_amplitude": m[:, AMP_IDX],
+        "harmonic_period": m[:, PERIOD_IDX],
+        "harmonic_phase": m[:, PHASE_IDX],
         "sigma": m[:, -1],
     }
     if n_flares:
-        flare = m[:, N_BACKGROUND_PARAMS:-1].reshape(m.shape[0], n_flares, 4)
+        flare = m[:, N_BACKGROUND_PARAMS:-1].reshape(m.shape[0], n_flares, N_FLARE_PARAMS)
         out["flare_amplitude"] = flare[:, :, 0]
         out["flare_peak_time"] = flare[:, :, 1]
         out["flare_rise_time"] = flare[:, :, 2]

@@ -7,8 +7,12 @@ import numpy as np
 
 from .config import PriorConfig, SamplerConfig
 from .models import (
+    AMP_IDX,
     N_BACKGROUND_PARAMS,
     N_FLARE_PARAMS,
+    N_HARMONICS,
+    PERIOD_IDX,
+    PHASE_IDX,
     full_model,
     split_model_components,
 )
@@ -37,24 +41,22 @@ class FitResult:
     map_source: str = "mcmc"
 
 
-def _clip_open(x: np.ndarray | float, low: np.ndarray | float, high: np.ndarray | float):
-    low_a = np.asarray(low, dtype=float)
-    high_a = np.asarray(high, dtype=float)
-    eps = 1e-6 * np.maximum(1.0, np.abs(high_a - low_a))
-    return np.clip(x, low_a + eps, high_a - eps)
-
-
 def initial_values(
     t: np.ndarray,
     y: np.ndarray,
     flare_indices: np.ndarray,
     noise_estimate: float,
     priors: PriorConfig,
-) -> dict[str, np.ndarray | float]:
-    """Create initial values for MCMC."""
+) -> tuple[np.ndarray, float]:
+    """Generic IDL-style starting state.
+
+    Returns ``(theta, sigma)`` with ``theta`` in the flat IDL/SoBAT parameter
+    order (without sigma), pushed just inside the prior bounds.
+    """
     t = np.asarray(t, dtype=float)
     y = np.asarray(y, dtype=float)
-    k = int(len(flare_indices))
+    flare_indices = np.asarray(flare_indices, dtype=int)
+    k = int(flare_indices.size)
 
     span = max(float(np.nanmax(t) - np.nanmin(t)), 1.0)
     a1 = max(0.5 * float(np.nanmax(y) - np.nanmin(y)), 1e-6)
@@ -64,38 +66,31 @@ def initial_values(
     amps = np.array([a1, a2, 0.5 * a2, 0.25 * a2], dtype=float)
     if k:
         periods = np.array([p1, p1 / 2.0, p1 / 3.0, max(p1 / 4.0, 50.0)])
-        period_low = priors.harmonic_period_low_with_flares
     else:
         p2 = 0.5 * p1
         periods = np.array([p1, p2, 0.5 * p2, 0.25 * p2])
-        period_low = priors.harmonic_period_low_without_flares
 
-    init: dict[str, np.ndarray | float] = {
-        "offset": float(_clip_open(np.nanmean(y), priors.offset_low, priors.offset_high)),
-        "harmonic_amplitude": _clip_open(
-            amps, priors.harmonic_amplitude_low, priors.harmonic_amplitude_high
-        ),
-        "harmonic_period": _clip_open(periods, period_low, priors.harmonic_period_high),
-        "harmonic_phase": np.zeros(4),
-    }
-
+    theta = np.zeros(N_BACKGROUND_PARAMS + N_FLARE_PARAMS * k)
+    theta[0] = np.nanmean(y)
+    theta[AMP_IDX] = amps
+    theta[PERIOD_IDX] = periods
+    theta[PHASE_IDX] = 0.0
     if k:
-        flare_indices = np.asarray(flare_indices, dtype=int)
-        peak_guess = t[flare_indices]
-        lo_t0 = peak_guess - priors.flare_peak_before
-        hi_t0 = peak_guess + priors.flare_peak_after
-        init.update(
-            {
-                "flare_amplitude": np.full(k, max(0.1 * noise_estimate, 1e-8)),
-                "flare_peak_time": _clip_open(peak_guess, lo_t0, hi_t0),
-                "flare_rise_time": np.full(k, 1.0),
-                "flare_decay_time": np.full(k, 10.0),
-            }
-        )
+        f = theta[N_BACKGROUND_PARAMS:].reshape(k, N_FLARE_PARAMS)
+        f[:, 1] = t[flare_indices]  # peak time
+        f[:, 2] = 1.0  # rise time
+        f[:, 3] = 10.0  # decay time
+
+    lo, hi = parameter_bounds(t, flare_indices, noise_estimate, priors)
+    eps = 1e-6 * np.maximum(1.0, hi - lo)
+    theta = np.clip(theta, lo + eps, hi - eps)
+    if k:  # small positive flare amplitudes (set after clipping, not clipped)
+        theta[N_BACKGROUND_PARAMS::N_FLARE_PARAMS] = max(0.1 * noise_estimate, 1e-8)
 
     sigma_high = max(float(np.nanmax(y) - np.nanmin(y)), 1e-6)
-    init["sigma"] = float(_clip_open(noise_estimate, 0.0, sigma_high))
-    return init
+    sigma_eps = 1e-6 * max(1.0, sigma_high)
+    sigma = float(np.clip(noise_estimate, sigma_eps, sigma_high - sigma_eps))
+    return theta, sigma
 
 
 def _ordered_periods(periods: np.ndarray, low: float, high: float) -> np.ndarray:
@@ -123,9 +118,9 @@ def model_start(
     Handles the cartesian harmonic parametrisation and the period ordering.
     """
     th = np.asarray(theta, dtype=float)
-    amp = th[[1, 4, 7, 10]]
-    per = th[[2, 5, 8, 11]]
-    pha = th[[3, 6, 9, 12]]
+    amp = th[AMP_IDX]
+    per = th[PERIOD_IDX]
+    pha = th[PHASE_IDX]
     d: dict[str, np.ndarray | float] = {"offset": float(th[0]), "sigma": float(sigma)}
     if config.order_periods:
         order = np.argsort(per)
@@ -190,7 +185,7 @@ def build_pymc_model(
     if noise_estimate is None:
         noise_estimate, _ = estimate_noise_savgol(y)
 
-    init = initial_values(t, y, flare_indices, noise_estimate, priors)
+    theta0, sigma0 = initial_values(t, y, flare_indices, noise_estimate, priors)
     period_low = (
         priors.harmonic_period_low_with_flares
         if n_flares
@@ -200,7 +195,7 @@ def build_pymc_model(
     a_max = priors.harmonic_amplitude_high
     sigma_high = max(float(np.ptp(y)), 1e-6)
     start = model_start(
-        _init_to_theta(init, n_flares), init["sigma"], n_flares,
+        theta0, sigma0, n_flares,
         period_low=period_low, period_high=period_high, config=config,
     )
 
@@ -214,14 +209,14 @@ def build_pymc_model(
             {"transform": pm.distributions.transforms.ordered} if config.order_periods else {}
         )
         period = pm.Uniform(
-            "harmonic_period", period_low, period_high, shape=4,
+            "harmonic_period", period_low, period_high, shape=N_HARMONICS,
             initval=start["harmonic_period"], **period_kw,
         )
         omega_t = 2.0 * np.pi * t_data[None, :] / period[:, None]
 
         if config.cartesian_harmonics:
-            b_sin = pm.Uniform("b_sin", -a_max, a_max, shape=4, initval=start["b_sin"])
-            b_cos = pm.Uniform("b_cos", -a_max, a_max, shape=4, initval=start["b_cos"])
+            b_sin = pm.Uniform("b_sin", -a_max, a_max, shape=N_HARMONICS, initval=start["b_sin"])
+            b_cos = pm.Uniform("b_cos", -a_max, a_max, shape=N_HARMONICS, initval=start["b_cos"])
             amp = pm.Deterministic("harmonic_amplitude", pt.sqrt(b_sin**2 + b_cos**2))
             pm.Deterministic("harmonic_phase", pt.arctan2(b_cos, b_sin))
             # restrict to the disc A <= A_max (the IDL amplitude range)
@@ -233,11 +228,11 @@ def build_pymc_model(
             harmonic_terms = b_sin[:, None] * pt.sin(omega_t) + b_cos[:, None] * pt.cos(omega_t)
         else:
             amp = pm.Uniform(
-                "harmonic_amplitude", priors.harmonic_amplitude_low, a_max, shape=4,
+                "harmonic_amplitude", priors.harmonic_amplitude_low, a_max, shape=N_HARMONICS,
                 initval=start["harmonic_amplitude"],
             )
             phase = pm.Uniform(
-                "harmonic_phase", priors.phase_low, priors.phase_high, shape=4,
+                "harmonic_phase", priors.phase_low, priors.phase_high, shape=N_HARMONICS,
                 initval=start["harmonic_phase"],
             )
             harmonic_terms = amp[:, None] * pt.sin(omega_t + phase[:, None])
@@ -286,23 +281,18 @@ def build_pymc_model(
         sigma = pm.Uniform("sigma", 0.0, sigma_high, initval=start["sigma"])
         pm.Normal("obs", mu=mu, sigma=sigma + 1e-20, observed=y)
 
-    return model, init
+    return model
 
 
-def _posterior_parameter_matrix(idata: Any, n_flares: int) -> np.ndarray:
-    """Flatten PyMC posterior into SoBAT-compatible parameter order."""
-    return _posterior_parameter_matrix_from(idata.posterior, n_flares)
-
-
-def _posterior_parameter_matrix_from(posterior: Any, n_flares: int) -> np.ndarray:
-
+def _posterior_parameter_matrix(posterior: Any, n_flares: int) -> np.ndarray:
+    """Flatten a PyMC posterior (``idata.posterior``) into SoBAT parameter order."""
     offset = np.asarray(posterior["offset"].values).reshape(-1, 1)
-    amp = np.asarray(posterior["harmonic_amplitude"].values).reshape(-1, 4)
-    period = np.asarray(posterior["harmonic_period"].values).reshape(-1, 4)
-    phase = np.asarray(posterior["harmonic_phase"].values).reshape(-1, 4)
+    amp = np.asarray(posterior["harmonic_amplitude"].values).reshape(-1, N_HARMONICS)
+    period = np.asarray(posterior["harmonic_period"].values).reshape(-1, N_HARMONICS)
+    phase = np.asarray(posterior["harmonic_phase"].values).reshape(-1, N_HARMONICS)
 
     cols = [offset]
-    for j in range(4):
+    for j in range(N_HARMONICS):
         cols.extend([amp[:, j : j + 1], period[:, j : j + 1], phase[:, j : j + 1]])
 
     if n_flares:
@@ -338,7 +328,7 @@ def _log_likelihoods(
     for a in range(0, samples.shape[0], chunk):
         s = samples[a : a + chunk]
         mu = np.broadcast_to(s[:, [0]], (s.shape[0], n)).copy()
-        for j in range(4):
+        for j in range(N_HARMONICS):
             i = 1 + 3 * j
             mu += s[:, [i]] * np.sin(2.0 * np.pi * t[None, :] / s[:, [i + 1]] + s[:, [i + 2]])
         for k in range(n_flares):
@@ -355,27 +345,9 @@ def _log_likelihoods(
     return out
 
 
-def _init_to_theta(init: dict[str, Any], n_flares: int) -> np.ndarray:
-    th = [float(init["offset"])]
-    for j in range(4):
-        th += [
-            init["harmonic_amplitude"][j],
-            init["harmonic_period"][j],
-            init["harmonic_phase"][j],
-        ]
-    for k in range(n_flares):
-        th += [
-            init["flare_amplitude"][k],
-            init["flare_peak_time"][k],
-            init["flare_rise_time"][k],
-            init["flare_decay_time"][k],
-        ]
-    return np.asarray(th, dtype=float)
-
-
 def _chain_starts(
     optima: list[LocalOptimum],
-    fallback: dict[str, Any],
+    fallback: tuple[np.ndarray, float],
     t: np.ndarray,
     y: np.ndarray,
     flare_indices: np.ndarray,
@@ -392,6 +364,7 @@ def _chain_starts(
     run and inflates R-hat.  Each start is jittered by
     ``config.start_jitter`` x the local (Laplace) standard deviation of every
     parameter, so chains start *inside* the mode rather than far outside it.
+    Without optima, every chain starts at ``fallback = (theta, sigma)``.
     """
     n_flares = flare_indices.size
     n = y.size
@@ -400,7 +373,7 @@ def _chain_starts(
     sigma_high = max(float(np.ptp(y)), 1e-6)
     if not optima:
         return [
-            model_start(_init_to_theta(fallback, n_flares), fallback["sigma"], n_flares,
+            model_start(*fallback, n_flares,
                         period_low=period_low, period_high=period_high, config=config)
         ] * config.chains
 
@@ -530,7 +503,7 @@ def _convergence_diagnostics(
         n_draw = post.sizes["draw"]
         step = max(1, n_draw // max_draws)
         sub = post.isel(draw=slice(None, None, step))
-        samples = _posterior_parameter_matrix_from(sub, n_flares)  # (chain*draw, p)
+        samples = _posterior_parameter_matrix(sub, n_flares)  # (chain*draw, p)
         c, d = sub.sizes["chain"], sub.sizes["draw"]
 
         # parameter-level
@@ -603,7 +576,8 @@ def fit_curve(
     if noise_estimate is None:
         noise_estimate, _ = estimate_noise_savgol(y)
 
-    model, init = build_pymc_model(
+    theta0, sigma0 = initial_values(t, y, flare_indices, noise_estimate, priors)
+    model = build_pymc_model(
         t,
         y,
         flare_indices,
@@ -621,13 +595,13 @@ def fit_curve(
             flare_indices,
             noise_estimate,
             priors,
-            first_guess=_init_to_theta(init, n_flares),
+            first_guess=theta0,
             n_starts=config.n_starts,
             max_nfev=config.max_nfev,
             rng=rng,
         )
     chain_inits = _chain_starts(
-        optima, init, t, y, flare_indices, noise_estimate, priors, config, rng
+        optima, (theta0, sigma0), t, y, flare_indices, noise_estimate, priors, config, rng
     )
 
     with model:
@@ -655,7 +629,7 @@ def fit_curve(
 
         idata = pm.sample(**sample_kwargs)
 
-    samples = _posterior_parameter_matrix(idata, n_flares)
+    samples = _posterior_parameter_matrix(idata.posterior, n_flares)
     loglike = _log_likelihoods(t, y, samples, n_flares)
     i_map = int(np.nanargmax(loglike))
     map_params = samples[i_map].copy()
