@@ -153,3 +153,48 @@ def test_model_start_ordered_and_cartesian_roundtrip():
     amp = np.hypot(d["b_sin"], d["b_cos"])
     order = np.argsort(th[[2, 5, 8, 11]], kind="stable")
     np.testing.assert_allclose(amp, th[[1, 4, 7, 10]][order])
+
+
+def test_initial_values_inside_prior_bounds():
+    from tec_mcmc.config import PriorConfig
+    from tec_mcmc.inference import initial_values
+    from tec_mcmc.optimize import parameter_bounds
+
+    t = np.linspace(0, 600, 200)  # long span: the first period guess hits the upper bound
+    y = 5 + np.sin(t / 30)
+    flares = np.array([50, 150])
+    theta, sigma = initial_values(t, y, flares, 0.05, PriorConfig())
+    lo, hi = parameter_bounds(t, flares, 0.05, PriorConfig())
+    assert theta.shape == (13 + 4 * 2,)
+    assert np.all(theta > lo) and np.all(theta < hi)
+    assert 0 < sigma < np.ptp(y)
+
+
+def test_parameter_index_constants():
+    from tec_mcmc.models import AMP_IDX, PERIOD_IDX, PHASE_IDX
+
+    np.testing.assert_array_equal(AMP_IDX, [1, 4, 7, 10])
+    np.testing.assert_array_equal(PERIOD_IDX, [2, 5, 8, 11])
+    np.testing.assert_array_equal(PHASE_IDX, [3, 6, 9, 12])
+
+
+def test_save_json_atomic_roundtrip(tmp_path):
+    import json
+
+    from tec_mcmc.batch import save_json_atomic
+
+    out = tmp_path / "res.json"
+    save_json_atomic({"flare_0": {"map_params": [1.0, 2.0]}}, out)
+    assert json.loads(out.read_text()) == {"flare_0": {"map_params": [1.0, 2.0]}}
+    assert not out.with_suffix(".tmp").exists()
+
+
+def test_prepare_curve_shifts_time_and_adds_dummy():
+    from tec_mcmc.tec import prepare_curve
+
+    t_abs = 300.0 + np.arange(100.0)
+    y = np.sin(t_abs / 10)
+    t, y2, flare_idx, true_idx, t0 = prepare_curve(t_abs, y, [320.2], rng=np.random.default_rng(0))
+    assert t0 == 300.0 and t[0] == 0.0 and y2.shape == y.shape
+    np.testing.assert_array_equal(true_idx, [20])
+    assert flare_idx.size == 2 and flare_idx[0] == 20
