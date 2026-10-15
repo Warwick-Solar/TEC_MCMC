@@ -7,3 +7,5 @@ build/
 dist/
 *.png
 tec_mcmc_results/
+.ipynb_checkpoints/
+.DS_Store
