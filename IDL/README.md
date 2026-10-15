@@ -96,8 +96,4 @@ If you use this code, please cite:
 
 ## Author
 
-Dmitrii Y. Kolotkov, University of Warwick (d.kolotkov.1@warwick.ac.uk)
-
-## License
-
-GPL-3.0, the same license as SoBAT (see `LICENSE`).
+Dmitrii Kolotkov, University of Warwick (d.kolotkov.1@warwick.ac.uk)
