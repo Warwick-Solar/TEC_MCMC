@@ -56,4 +56,4 @@ Apache License 2.0, see [`LICENSE`](LICENSE).
 ## Authors
 
 - Dmitrii Kolotkov, University of Warwick (d.kolotkov.1@warwick.ac.uk): IDL code
-- Sergey Belov, University of Warwick (sergey.belov@warwick.ac.uk): Python code
+- Sergey Belov, University of Warwick (sergey.belov@warwick.ac.uk): Python code, developed with AI coding assistants (OpenAI ChatGPT, Anthropic Claude); see [`python/README.md`](python/README.md#ai-assistance)

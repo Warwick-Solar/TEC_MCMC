@@ -135,7 +135,6 @@ No figures are written; the notebook shows how to plot the fit, ΔTEC and the ch
 - **Output.** `FitResult` / JSON instead of the `.sav` file; no NaN dummy block for curves with ≥ 3 reference peaks.
 - **Preprocessing details.** Beyond the first/last plateau the edge value is held constant (IDL `INTERPOL` extrapolates linearly); the last plateau is closed; double precision throughout.
 
-
 ## Notes on convergence
 
 Over a ~2-hour window many sets of four sinusoids give the same smooth trend, and two nearby-period sinusoids with large opposite amplitudes can cancel. Single background parameters are therefore not identifiable and their R-hat stays above 1; this is a property of the model and its wide priors, not of the sampler. The quantities that matter are checked instead:
@@ -169,3 +168,7 @@ If you use this code, please cite:
 ## Author
 
 Sergey Belov, University of Warwick (sergey.belov@warwick.ac.uk)
+
+## AI assistance
+
+The Python port was developed with the help of AI coding assistants, OpenAI ChatGPT and Anthropic Claude, working from the IDL routine. The author reviewed and tested the code and is responsible for it.
