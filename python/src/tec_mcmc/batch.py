@@ -43,7 +43,7 @@ def fit_tec_csv(
 ) -> dict:
     """Fit TEC curves from a CSV in parallel and collect best-fit parameters in JSON.
 
-    Each curve gets an entry ``"flare_<id>"`` (``<id>`` = 0-based curve number)::
+    Each curve gets an entry ``"curve_<id>"`` (``<id>`` = 0-based curve number)::
 
         {"t_0": absolute start time [min],
          "t": fitted time grid relative to t_0 [min],
@@ -83,7 +83,7 @@ def fit_tec_csv(
 
     jobs, meta = [], {}
     for i in ids:
-        if f"flare_{i}" in results:
+        if f"curve_{i}" in results:
             continue
         t_abs, y_raw = all_curves[i]
         rng = np.random.default_rng(i)  # dummy-flare placement, reproducible per curve
@@ -109,7 +109,7 @@ def fit_tec_csv(
             except Exception as exc:  # one bad curve must not stop the run
                 print(f"curve {i} failed: {exc!r}")
                 continue
-            results[f"flare_{i}"] = {**meta[i], "map_params": params}
+            results[f"curve_{i}"] = {**meta[i], "map_params": params}
             unsaved += 1
             if unsaved >= save_every:
                 save_json_atomic(results, out_json)
